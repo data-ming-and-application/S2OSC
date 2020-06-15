@@ -20,21 +20,32 @@ warnings.filterwarnings("ignore")
 
 class Stream:
     def __init__(self, logger: Logger, log_folder: str, dataset_name: str,
-                 model_f: ResNet34, centers: Centers, memory: Memory,
-                 batch_size: int, pool_size: int, epochs_g: int, K: int):
+                 model_f: ResNet34, centers: Centers, memory: Memory, T: float, K: int,
+                 epochs: int, batch_size: int, lr: float, sgd_beta: float, sgd_decay: float,
+                 lamda: float, alpha: float, lamda_u: float, tao: float):
         self.logger = logger
         self.log_folder = log_folder
         self.dataset_name = dataset_name
         self.model_f = model_f
-
         self.centers = centers
         self.memory = memory
 
-        self.batch_size = batch_size
-        self.pool_size = pool_size
-        self.epochs_g = epochs_g
+        self.T = T
         self.K = K
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.lr = lr
 
+        self.sgd_beta = sgd_beta
+        self.sgd_decay = sgd_decay
+
+        self.lamda = lamda
+        self.alpha = alpha
+        self.lamda_u = lamda_u
+        self.tao = tao
+
+        self.pool_size = 6000
+        self.n_repeat = 100
         self._pool_raw_data = None
         self._pool_data = None
         self._pool_true_labels = None
@@ -43,13 +54,12 @@ class Stream:
         self._known_labels_set = None
         self._novel_labels_set = None
         self._novel_pseudo_label = None
-        self.n_cluster = None
 
     def train(self) -> NoReturn:
         dataset = Dataset(dataset_name=self.dataset_name, dataset_type="stream")
         dataloader = DataLoader(dataset, batch_size=self.pool_size, shuffle=True, num_workers=4)
 
-        model_g = ResNet34().cuda()
+        model_g = ResNet18(T=self.T).cuda()
         for iteration, (pool_raw_data, pool_data, pool_true_labels) in enumerate(dataloader):
             self.logger.info(f"--------    Window {iteration}    --------")
             self._show_data_info(pool_true_labels)
@@ -102,22 +112,23 @@ class Stream:
 
     def _calc_weights(self, data: Tensor, _labels: Tensor) -> ndarray:
         dataset = PoolDataset(None, data, _labels)
-        dataloader = DataLoader(dataset, batch_size=128, shuffle=True, num_workers=4)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
 
         weights_array = np.zeros(0, dtype=np.float32)
         centers = self.centers.centers[list(self.centers.centers_index)].cpu()
 
         with torch.no_grad():
-            for j, (_, batch_data, _label) in enumerate(dataloader):
+            for _, batch_data, _label in dataloader:
                 batch_features = self.model_f(batch_data.cuda())[0].cpu()
-                dis = torch.zeros(batch_data.shape[0], dtype=torch.float32)
+                batch_u = torch.mean(- batch_features * torch.log(batch_features), dim=1)
+                batch_d = torch.zeros(batch_data.shape[0], dtype=torch.float32)
                 for i, feature in enumerate(batch_features):
-                    dis[i] = torch.min(torch.norm(feature - centers, dim=1))
-                weights_array = np.r_[weights_array, dis.numpy()]
+                    batch_d[i] = torch.min(torch.norm(feature - centers, dim=1))
+                batch_w = batch_u + self.lamda * batch_d
+                weights_array = np.r_[weights_array, batch_w.numpy()]
 
-        mid_weight = np.mean(weights_array)
-        weights_array = (weights_array - mid_weight) ** 2
-
+        # mid_weight = np.mean(weights_array)
+        # weights_array = (weights_array - mid_weight) ** 2
         return weights_array
 
     def _split_data(self, raw_data: Tensor, data: Tensor, labels: Tensor, weights: ndarray) \
@@ -139,43 +150,32 @@ class Stream:
                        dataset_u_data: Tensor) -> ResNet18:
         self.logger.debug("----    train Model_G    ----")
 
-        lr = 0.001
-        rate_ls2 = 0.01
-        rate_lu = 0.01
-        rate_lu2 = 0.01
-        tao = 0.85
-        n_repeat = 100
-        if self.dataset_name in ["svhn"]:
-            lr = 0.0002
-
-        dataset_x_data_novel = dataset_x_data[dataset_x_labels == self._novel_pseudo_label][:n_repeat]
-        dataset_x_labels_novel = dataset_x_labels[dataset_x_labels == self._novel_pseudo_label][:n_repeat]
+        dataset_x_data_novel = dataset_x_data[dataset_x_labels == self._novel_pseudo_label][:self.n_repeat]
+        dataset_x_labels_novel = dataset_x_labels[dataset_x_labels == self._novel_pseudo_label][:self.n_repeat]
         dataset_x_data = torch.cat([dataset_x_data, dataset_x_data_novel])
         dataset_x_labels = torch.cat([dataset_x_labels, dataset_x_labels_novel])
 
         dataset_x = PoolDataset(dataset_x_data, None, dataset_x_labels)
         dataset_u = PoolDataset(None, dataset_u_data, None)
 
-        dataloader_x = DataLoader(dataset_x, batch_size=self.batch_size, shuffle=True, num_workers=4)
-        dataloader_u = DataLoader(dataset_u, batch_size=self.batch_size, shuffle=True, num_workers=4)
+        dataloader_x = DataLoader(dataset_x, batch_size=self.batch_size // 2, shuffle=True, num_workers=4)
+        dataloader_u = DataLoader(dataset_u, batch_size=self.batch_size // 2, shuffle=True, num_workers=4)
         self._show_data_info(dataset_x_labels.numpy())
 
         model_g.train()
         ce = CrossEntropyLoss()
         softmax = Softmax()
-        optimizer = torch.optim.SGD(model_g.parameters(), lr=lr, momentum=0.9, weight_decay=0.001)
+        optimizer = torch.optim.SGD(model_g.parameters(), lr=self.lr, momentum=self.sgd_beta,
+                                    weight_decay=self.sgd_decay)
 
-        for epoch in range(1, self.epochs_g + 1):
+        for epoch in range(1, self.epochs + 1):
             loss_list = []
             pred_list = []
             true_list = []
 
-            self.logger.debug(f"$ dataset = {self.dataset_name}    novel_label = {self._novel_pseudo_label}    "
-                              f"K = {self.K}    n_repeat = {n_repeat}    "
-                              f"lr = {lr}    rate_ls2 = {rate_ls2}    rate_lu = {rate_lu}    rate_lu2 = {rate_lu2}")
-
             for (_, x_data, x_labels), (_, u_data, _) in zip(dataloader_x, dataloader_u):
                 loss_str = ""
+                optimizer.zero_grad()
 
                 x_weak = x_data
                 u_weak = u_data
@@ -188,9 +188,7 @@ class Stream:
                 u_weak = u_weak.cuda()
                 u_strong = u_strong.cuda()
 
-                optimizer.zero_grad()
-
-                # labeled data
+                # ---- labeled data ----
                 x_in_mask = torch.zeros_like(x_labels, dtype=torch.uint8)
                 for k in self.centers.centers_index:
                     x_in_mask[x_labels == k] = 1
@@ -203,34 +201,47 @@ class Stream:
                 true_list.extend(x_labels.cpu().tolist())
 
                 n = self._max_label
-                ls = ce(g_weak_x, x_labels)
-                if rate_ls2 > 0.0 and x_in_mask.max() == 1:
+                x_out_mask = g_weak_x.max(dim=1)[0] >= self.tao
+
+                # ls1
+                ls1 = torch.tensor(0., dtype=torch.float32, requires_grad=True).cuda()
+                if x_in_mask.max() == 1:
+                    ls1 = ce(softmax(g_weak_x[:, :n + 1])[x_in_mask], x_labels[x_in_mask])
+                if x_out_mask.max() == 1:
+                    ls1 = ls1 + ce(softmax(g_weak_x[:, :n + 1])[x_out_mask], x_labels[x_out_mask])
+
+                # ls2
+                ls2 = torch.tensor(0., dtype=torch.float32, requires_grad=True).cuda()
+                if self.alpha > 0.0 and x_in_mask.max() == 1:
                     p = softmax(f_x[:, :n])
                     q = softmax(g_weak_x[:, :n]) + 1e-38
                     ls2 = torch.mean(p * torch.log(p / q))
-                    loss_str += f"ls1 = {ls:5.2f}    ls2 = {ls2:5.2f}"
-                    ls = ls + rate_ls2 * ls2
 
-                # unlabeled data
+                # ls
+                loss_str += f"ls1 = {ls1:5.2f}    ls2 = {ls2:5.2f}"
+                ls = ls1 + self.alpha * ls2
+
+                # ---- unlabeled data ----
                 lu = torch.tensor(0., dtype=torch.float32, requires_grad=True).cuda()
-                if rate_lu > 0.0:
+                if self.lamda_u > 0.0:
                     qu = model_g(u_weak)[1]
                     qu_cat = qu.argmax(dim=1)
-                    tao_mask = qu.max(1)[0] > tao
-
+                    tao_mask = qu.max(1)[0] >= self.tao
                     f_u = self.model_f(u_data)[1]
                     g_strong_u = model_g(u_strong)[1]
 
+                    lu1 = torch.tensor(0., dtype=torch.float32, requires_grad=True).cuda()
+                    lu2 = torch.tensor(0., dtype=torch.float32, requires_grad=True).cuda()
                     if tao_mask.max() == 1:
-                        lu1 = lu + ce(g_strong_u[tao_mask], qu_cat[tao_mask])
+                        lu1 = ce(g_strong_u[tao_mask], qu_cat[tao_mask])
                         p = f_u[tao_mask, :n]
                         q = g_strong_u[tao_mask, :n] + 1e-38
                         lu2 = torch.mean(p * torch.log(p / q))
                         loss_str += f"    lu1 = {lu1:5.2f}    lu2 = {lu2:5.2f}"
-                        lu = lu1 + rate_lu2 * lu2
+                    lu = lu1 + self.alpha * lu2
 
                 # total loss
-                loss = ls + rate_lu * lu
+                loss = ls + self.lamda_u * lu
                 loss.backward()
                 optimizer.step()
                 loss_list.append(loss.item())
@@ -240,7 +251,7 @@ class Stream:
             average_loss = np.array(loss_list, dtype=np.float32).mean()
             self.logger.debug(f"epoch = {epoch}    {average_loss}")
             acc = metrics.accuracy_score(y_pred=pred_list, y_true=true_list)
-            self.logger.debug(f"Epoch {epoch:3d} / {self.epochs_g :<3d}    Accuracy = {acc * 100:5.2f}% ")
+            self.logger.debug(f"Epoch {epoch:3d} / {self.epochs :<3d}    Accuracy = {acc * 100:5.2f}% ")
             m = metrics.confusion_matrix(y_pred=pred_list, y_true=true_list)
             self.logger.debug(f"\n{m}")
             if epoch == 5 or epoch >= 10:

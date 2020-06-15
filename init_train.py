@@ -27,8 +27,9 @@ def d(dataset_name: str) -> str:
     return dataset_name
 
 
-def load_or_init_train(logger: Logger, dataset_name: str, train: bool, epochs: int, n_out: int,
-                       model: ResNet34, memory: Memory, centers: Centers, running_path: str):
+def load_or_init_train(logger: Logger, dataset_name: str, train: bool, n_out: int,
+                       model: ResNet34, memory: Memory, centers: Centers, running_path: str,
+                       epochs: int, batch_size: int, lr: float, sgd_beta: float, sgd_decay: float):
     if not os.path.exists(running_path):
         os.makedirs(running_path)
 
@@ -37,7 +38,8 @@ def load_or_init_train(logger: Logger, dataset_name: str, train: bool, epochs: i
     memory_file = f"{running_path}/{dataset_name}_init.memory.npz"
 
     if train:
-        model = init_train(logger=logger, dataset_name=dataset_name, model=model, epochs=epochs)
+        model = init_train(logger=logger, dataset_name=dataset_name, model=model, epochs=epochs,
+                           batch_size=batch_size, lr=lr, sgd_beta=sgd_beta, sgd_decay=sgd_decay)
         model.save(model_file)
         logger.info(f'Saved Model_F to "{model_file}".')
 
@@ -61,15 +63,16 @@ def load_or_init_train(logger: Logger, dataset_name: str, train: bool, epochs: i
         logger.info(f'Loaded Centers from "{centers_file}".')
 
 
-def init_train(logger: Logger, dataset_name: str, model: ResNet34, epochs: int) -> ResNet34:
+def init_train(logger: Logger, dataset_name: str, model: ResNet34, epochs: int,
+               batch_size: int, lr: float, sgd_beta: float, sgd_decay: float) -> ResNet34:
     logger.debug("--------    Start Initial Training    --------")
 
     dataset = Dataset(dataset_name=dataset_name, dataset_type="init")
-    dataloader = DataLoader(dataset, batch_size=128, shuffle=True, num_workers=4)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
 
     model.train()
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=0.001)
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=sgd_beta, weight_decay=sgd_decay)
 
     for epoch in range(1, epochs + 1):
         y_pred = []

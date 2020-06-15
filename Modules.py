@@ -15,18 +15,19 @@ from typing import Tuple, NoReturn
 
 
 class ResNet18(nn.Module):
-    def __init__(self, n_out=10):
+    def __init__(self, n_out=10, T=1):
         super(ResNet18, self).__init__()
         self.resnet18 = torchvision.models.resnet18(pretrained=True)
         self.resnet18 = nn.Sequential(*list(self.resnet18.children())[:-1])
         self.fc = torch.nn.Linear(in_features=512, out_features=n_out)
         self.relu = nn.ReLU(inplace=True)
         self.softmax = nn.Softmax(dim=1)
+        self.T = T
 
     def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
         f512 = self.resnet18(x).view(-1, 512)
         f10 = self.fc(self.relu(f512))
-        f10 = self.softmax(f10)
+        f10 = self.softmax(f10 / self.T)
         return f512, f10
 
     def load(self, filename: str) -> NoReturn:
