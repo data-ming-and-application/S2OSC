@@ -17,7 +17,7 @@ if __name__ == '__main__':
     parser.add_argument("--T", type=float, default=3)
     parser.add_argument("--lamda", type=float, default=1.0)
     # initial arguments
-    parser.add_argument("--init_epochs", type=int, default=3)  #TODO: 20
+    parser.add_argument("--init_epochs", type=int, default=20)
     parser.add_argument("--init_batch_size", type=int, default=64)
     parser.add_argument("--init_lr", type=float, default=0.01)
     parser.add_argument("--init_SGD_beta", type=float, default=0.9)
