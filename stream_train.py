@@ -169,7 +169,7 @@ class Stream:
 
         model_g.train()
         ce = CrossEntropyLoss()
-        optimizer = torch.optim.SGD(model_g.parameters(), lr=self.lr, momentum=self.sgd_beta,
+        optimizer = torch.optim.SGD(model_g.parameters(), lr=self.lr / 10, momentum=self.sgd_beta,
                                     weight_decay=self.sgd_decay)
 
         for epoch in range(1, self.epochs + 1):

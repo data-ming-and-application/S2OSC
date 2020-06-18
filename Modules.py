@@ -27,7 +27,7 @@ class ResNet18(nn.Module):
     def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
         f512 = self.resnet18(x).view(-1, 512)
         f10 = self.fc(self.relu(f512))
-        f10 = self.softmax(f10 / self.T)
+        f10 = self.softmax(f10)
         return f512, f10
 
     def load(self, filename: str) -> NoReturn:
@@ -50,7 +50,7 @@ class ResNet34(nn.Module):
     def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
         f512 = self.resnet34(x).view(-1, 512)
         f10 = self.fc(self.relu(f512))
-        f10 = self.softmax(f10 / self.T)
+        f10 = self.softmax(f10)
         return f512, f10
 
     def load(self, filename: str) -> NoReturn:

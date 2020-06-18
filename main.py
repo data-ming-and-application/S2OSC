@@ -11,8 +11,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="S2OSC")
     parser.add_argument("--dataset", type=str, default="c10", choices=["m", "fm", "c10", "cinic", "svhn"])
     parser.add_argument("--device", type=str, default="0", choices=["0", "1", "2", "3", "4", "5"])
-    parser.add_argument("--train", type=bool, default=False,
-                        help="True to train, False to load pretrained files.")  # True
+    parser.add_argument("--train", type=bool, default=True, help="True to train, False to load pretrained files.")
     parser.add_argument("--K", type=int, default=300, help="Number of instances for each class stores in the memory.")
     parser.add_argument("--M", type=float, default=2000)
     parser.add_argument("--T", type=float, default=3)
@@ -26,7 +25,7 @@ if __name__ == '__main__':
     # stream arguments
     parser.add_argument("--stream_epochs", type=int, default=30)
     parser.add_argument("--stream_batch_size", type=int, default=64)
-    parser.add_argument("--stream_lr", type=float, default=0.0005)
+    parser.add_argument("--stream_lr", type=float, default=0.005)
     parser.add_argument("--stream_SGD_beta", type=float, default=0.9)
     parser.add_argument("--stream_SGD_decay", type=float, default=0.0005)
     # loss function arguments
