@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor
 from torch.utils.data import DataLoader
-from torch.nn import CrossEntropyLoss, Softmax
+from torch.nn import CrossEntropyLoss
 
 import numpy as np
 from numpy import ndarray
@@ -20,7 +20,7 @@ warnings.filterwarnings("ignore")
 
 class Stream:
     def __init__(self, logger: Logger, log_folder: str, dataset_name: str,
-                 model_f: ResNet34, centers: Centers, memory: Memory, T: float, K: int,
+                 model_f: ResNet34, centers: Centers, memory: Memory, T: float, K: int, n_out: int,
                  epochs: int, batch_size: int, lr: float, sgd_beta: float, sgd_decay: float,
                  lamda: float, alpha: float, lamda_u: float, tao: float):
         self.logger = logger
@@ -32,6 +32,7 @@ class Stream:
 
         self.T = T
         self.K = K
+        self.n_out = n_out
         self.epochs = epochs
         self.batch_size = batch_size
         self.lr = lr
@@ -45,7 +46,7 @@ class Stream:
         self.tao = tao
 
         self.pool_size = 6000
-        self.n_repeat = 100
+        self.n_repeat = 200
         self._pool_raw_data = None
         self._pool_data = None
         self._pool_true_labels = None
@@ -59,7 +60,7 @@ class Stream:
         dataset = Dataset(dataset_name=self.dataset_name, dataset_type="stream")
         dataloader = DataLoader(dataset, batch_size=self.pool_size, shuffle=True, num_workers=4)
 
-        model_g = ResNet18(T=self.T).cuda()
+        model_g = ResNet18(n_out=self.n_out, T=self.T).cuda()
         for iteration, (pool_raw_data, pool_data, pool_true_labels) in enumerate(dataloader):
             self.logger.info(f"--------    Window {iteration}    --------")
             self._show_data_info(pool_true_labels)
@@ -80,6 +81,10 @@ class Stream:
             u_raw_data, u_data, u_true_labels, out_raw_data, out_data, out_true_labels = \
                 self._split_data(pool_raw_data, pool_data, pool_true_labels, weight_array)
 
+            # TODO
+            # out_raw_data = pool_raw_data[pool_true_labels == 5][:self.K]
+            # out_labels = pool_true_labels[pool_true_labels == 5][:self.K].int()
+
             # ---- get pseudo label ----
             self._novel_pseudo_label = self._get_pseudo_label()
             out_labels = torch.full_like(out_true_labels, self._novel_pseudo_label, dtype=torch.int32)
@@ -95,14 +100,14 @@ class Stream:
             in_data, in_labels = self.memory.get_data(num=self.K)
             in_data = torch.tensor(in_data, dtype=torch.float32)
             in_labels = torch.tensor(in_labels, dtype=torch.int32)
-            in_known_label = list(self.centers.centers_index)[0]
             x_data = torch.cat([in_data, out_raw_data])
             x_labels = torch.cat([in_labels, out_labels])
-            self.logger.debug(f"Known Pseudo Label = {in_known_label}")
 
             # ---- train model g ----
             self._predict(model_g)
             self._train_model_g(model_g, x_data, x_labels, u_data)
+
+            break
 
     def _show_data_info(self, batch_labels: ndarray) -> NoReturn:
         labels, counts = np.unique(batch_labels, return_counts=True)
@@ -127,8 +132,8 @@ class Stream:
                 batch_w = batch_u + self.lamda * batch_d
                 weights_array = np.r_[weights_array, batch_w.numpy()]
 
-        # mid_weight = np.mean(weights_array)
-        # weights_array = (weights_array - mid_weight) ** 2
+        mid_weight = np.mean(weights_array)
+        weights_array = (weights_array - mid_weight) ** 2
         return weights_array
 
     def _split_data(self, raw_data: Tensor, data: Tensor, labels: Tensor, weights: ndarray) \
@@ -164,7 +169,6 @@ class Stream:
 
         model_g.train()
         ce = CrossEntropyLoss()
-        softmax = Softmax()
         optimizer = torch.optim.SGD(model_g.parameters(), lr=self.lr, momentum=self.sgd_beta,
                                     weight_decay=self.sgd_decay)
 
@@ -195,26 +199,25 @@ class Stream:
 
                 f_x = self.model_f(x_data)[1]
                 g_weak_x = model_g(x_weak)[1]
+                x_out_mask = g_weak_x.max(dim=1)[0] >= self.tao
+                x_out_mask[x_in_mask == 0] = True
 
                 y_pred = g_weak_x.max(dim=1)[1]
                 pred_list.extend(y_pred.cpu().tolist())
                 true_list.extend(x_labels.cpu().tolist())
 
-                n = self._max_label
-                x_out_mask = g_weak_x.max(dim=1)[0] >= self.tao
-
                 # ls1
                 ls1 = torch.tensor(0., dtype=torch.float32, requires_grad=True).cuda()
                 if x_in_mask.max() == 1:
-                    ls1 = ce(softmax(g_weak_x[:, :n + 1])[x_in_mask], x_labels[x_in_mask])
+                    ls1 = ce(g_weak_x[x_in_mask], x_labels[x_in_mask])
                 if x_out_mask.max() == 1:
-                    ls1 = ls1 + ce(softmax(g_weak_x[:, :n + 1])[x_out_mask], x_labels[x_out_mask])
+                    ls1 = ls1 + ce(g_weak_x[x_out_mask], x_labels[x_out_mask])
 
                 # ls2
                 ls2 = torch.tensor(0., dtype=torch.float32, requires_grad=True).cuda()
                 if self.alpha > 0.0 and x_in_mask.max() == 1:
-                    p = softmax(f_x[:, :n])
-                    q = softmax(g_weak_x[:, :n]) + 1e-38
+                    p = f_x
+                    q = g_weak_x + 1e-38
                     ls2 = torch.mean(p * torch.log(p / q))
 
                 # ls
@@ -234,11 +237,11 @@ class Stream:
                     lu2 = torch.tensor(0., dtype=torch.float32, requires_grad=True).cuda()
                     if tao_mask.max() == 1:
                         lu1 = ce(g_strong_u[tao_mask], qu_cat[tao_mask])
-                        p = f_u[tao_mask, :n]
-                        q = g_strong_u[tao_mask, :n] + 1e-38
+                        p = f_u[tao_mask]
+                        q = g_strong_u[tao_mask] + 1e-38
                         lu2 = torch.mean(p * torch.log(p / q))
                         loss_str += f"    lu1 = {lu1:5.2f}    lu2 = {lu2:5.2f}"
-                    lu = lu1 + self.alpha * lu2
+                    lu = self.lamda_u * (lu1 + self.alpha * lu2)
 
                 # total loss
                 loss = ls + self.lamda_u * lu
@@ -267,7 +270,7 @@ class Stream:
     def _predict(self, model_g: ResNet18) -> Tuple[list, list]:
         self._show_data_info(self._pool_true_labels.numpy())
         dataset = PoolDataset(self._pool_raw_data, self._pool_data, self._pool_true_labels)
-        dataloader = DataLoader(dataset, batch_size=128, shuffle=True, num_workers=4)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
         self.model_f.eval()
         model_g.eval()
 
@@ -281,9 +284,15 @@ class Stream:
                 y_pred.extend(batch_pred.tolist())
                 y_true.extend(batch_labels.tolist())
 
-        acc = metrics.accuracy_score(y_pred=y_pred, y_true=y_true)
-        self.logger.debug(f"Test Accuracy = {acc * 100:5.2f}% ")
+        accuracy = metrics.accuracy_score(y_true=y_true, y_pred=y_pred)
+        precision = metrics.precision_score(y_true=y_true, y_pred=y_pred, average="weighted")
+        recall = metrics.recall_score(y_true=y_true, y_pred=y_pred, average="weighted")
+        f1 = metrics.f1_score(y_true=y_true, y_pred=y_pred, average="weighted")
         m = metrics.confusion_matrix(y_pred=y_pred, y_true=y_true)
+        self.logger.debug(f"Test Accuracy  = {accuracy * 100:5.2f}% ")
+        self.logger.debug(f"Test Precision = {precision * 100:5.2f}% ")
+        self.logger.debug(f"Test Recall    = {recall * 100:5.2f}% ")
+        self.logger.debug(f"Test F1        = {f1 * 100:5.2f}% ")
         self.logger.debug(f"\n{m}")
 
         return y_pred, y_true
