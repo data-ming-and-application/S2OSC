@@ -49,8 +49,7 @@ if __name__ == '__main__':
     memory = Memory(K=args.K)
     centers = Centers(rate_old=0.8, n_centers=n_out)
     load_or_init_train(logger=logger, dataset_name=args.dataset, train=args.train, n_out=n_out,
-                       model=modelF, memory=memory, centers=centers, running_path="log_20200617_004028_c10",
-                       # TODO:log_folder
+                       model=modelF, memory=memory, centers=centers, running_path=log_folder,
                        epochs=args.init_epochs, batch_size=args.init_batch_size, lr=args.init_lr,
                        sgd_beta=args.init_SGD_beta, sgd_decay=args.init_SGD_decay)
 
